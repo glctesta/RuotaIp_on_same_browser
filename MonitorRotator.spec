@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = []
+binaries = []
+hiddenimports = ['pyodbc', 'cryptography']
+tmp_ret = collect_all('selenium')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('screeninfo')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['monitor_rotator.py'],
     pathex=[],
-    binaries=[],
-    datas=[('monitor_config.json', '.'), ('db_config.enc', '.'), ('encryption_key.key', '.')],
-    hiddenimports=['selenium.webdriver.chrome.webdriver', 'selenium.webdriver.chrome.service', 'selenium.webdriver.chrome.options', 'selenium.webdriver.common.service', 'selenium.webdriver.common.driver_finder', 'selenium.webdriver.remote.webdriver', 'selenium.webdriver.remote.remote_connection', 'selenium.webdriver.common.options', 'selenium.webdriver.chromium.webdriver', 'selenium.webdriver.chromium.service', 'selenium.webdriver.chromium.options', 'selenium.webdriver.chromium.remote_connection'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

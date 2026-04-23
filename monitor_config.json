@@ -1,3 +1,15 @@
 {
-    "interval_minutes": 5
+    "interval_minutes": 5,
+    "monitor_index": 1,
+    "monitors": [
+        {
+            "ip": "192.168.10.72",
+            "port": 5001
+        },
+
+		{
+            "ip": "192.168.10.72",
+            "port": 5065
+        }
+    ]
 }

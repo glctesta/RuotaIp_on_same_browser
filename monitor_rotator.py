@@ -26,7 +26,9 @@ import signal
 import sys
 import time
 import traceback
+from html import escape as html_escape
 from logging.handlers import RotatingFileHandler
+from urllib.parse import quote as url_quote
 
 from screeninfo import get_monitors
 from selenium import webdriver
@@ -269,6 +271,118 @@ def create_kiosk_browser(target_monitor=None) -> webdriver.Chrome:
     return driver
 
 
+def _classify_load_error(exc: Exception) -> tuple[str, str]:
+    """Return (short_reason, hint) in English based on the Selenium error message."""
+    msg = str(exc)
+    low = msg.lower()
+    if "err_connection_timed_out" in low or "timed out" in low:
+        return (
+            "Connection timed out",
+            "The host did not respond. Check that the device is powered on, "
+            "reachable on the network, and that the IP address and port are correct.",
+        )
+    if "err_connection_refused" in low:
+        return (
+            "Connection refused",
+            "The host is reachable but nothing is listening on that port. "
+            "Verify the port number in monitor_config.json.",
+        )
+    if "err_name_not_resolved" in low or "name_not_resolved" in low:
+        return (
+            "Hostname could not be resolved",
+            "DNS lookup failed. Check the hostname spelling or use an IP address.",
+        )
+    if "err_address_unreachable" in low or "err_network" in low:
+        return (
+            "Network unreachable",
+            "The network path to the host is down. Check cabling, VPN, "
+            "and routing to the target subnet.",
+        )
+    if "err_cert" in low or "ssl" in low:
+        return (
+            "TLS / certificate error",
+            "The HTTPS certificate could not be validated. Use http:// "
+            "or fix the certificate on the target device.",
+        )
+    return ("Page could not be loaded", "See the message above for the underlying browser error.")
+
+
+def _build_error_page(url: str, exc: Exception, config_path: str) -> str:
+    """Build an HTML error page (data: URL) shown when a monitor URL fails to load."""
+    reason, hint = _classify_load_error(exc)
+    raw_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Monitor Rotator - Cannot reach {html_escape(url)}</title>
+<style>
+  html, body {{ height: 100%; margin: 0; }}
+  body {{
+    font-family: "Segoe UI", Arial, sans-serif;
+    background: #1f2937;
+    color: #f9fafb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .card {{
+    max-width: 900px;
+    padding: 48px 56px;
+    background: #111827;
+    border: 2px solid #f59e0b;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  }}
+  h1 {{ color: #f59e0b; font-size: 42px; margin: 0 0 8px 0; }}
+  h2 {{ color: #f3f4f6; font-size: 26px; margin: 0 0 24px 0; font-weight: 400; }}
+  .url {{
+    font-family: Consolas, monospace;
+    font-size: 22px;
+    background: #0b1220;
+    padding: 12px 18px;
+    border-radius: 6px;
+    color: #93c5fd;
+    word-break: break-all;
+    display: inline-block;
+    margin-bottom: 24px;
+  }}
+  .label {{ color: #9ca3af; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; margin-top: 20px; }}
+  .hint {{ font-size: 18px; line-height: 1.5; }}
+  ol {{ font-size: 17px; line-height: 1.7; padding-left: 22px; }}
+  code {{ background: #0b1220; padding: 2px 6px; border-radius: 4px; color: #fca5a5; }}
+  .footer {{ color: #6b7280; font-size: 13px; margin-top: 28px; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#9888; Monitor unreachable</h1>
+    <h2>{html_escape(reason)}</h2>
+
+    <div class="label">Target URL</div>
+    <div class="url">{html_escape(url)}</div>
+
+    <div class="label">What happened</div>
+    <p class="hint">{html_escape(hint)}</p>
+
+    <div class="label">How to fix it</div>
+    <ol>
+      <li>Open the configuration file: <code>{html_escape(config_path)}</code></li>
+      <li>Locate the entry for <code>{html_escape(url)}</code> inside the <code>"monitors"</code> array.</li>
+      <li>Correct the <code>ip</code> and/or <code>port</code> values, or remove the entry if the device is decommissioned.</li>
+      <li>Save the file. The rotator reloads the configuration on the next cycle &mdash; no restart needed.</li>
+    </ol>
+
+    <div class="label">Browser error</div>
+    <p><code>{html_escape(raw_msg)}</code></p>
+
+    <p class="footer">This page is shown automatically by Monitor Rotator when a configured URL cannot be loaded. Rotation continues to the next monitor at the next interval.</p>
+  </div>
+</body>
+</html>"""
+    return "data:text/html;charset=utf-8," + url_quote(html)
+
+
 def print_available_monitors(monitors: list) -> None:
     """Stampa la lista dei monitor rilevati."""
     if not monitors:
@@ -386,7 +500,12 @@ def main():
                 driver.get(url)
             except Exception as e:
                 log.exception("driver.get(%s) FALLITO: %s", url, e)
-                # continua con il prossimo giro invece di uscire
+                # Mostra una pagina d'errore in inglese sul monitor invece
+                # di lasciare la schermata precedente (o un crash).
+                try:
+                    driver.get(_build_error_page(url, e, CONFIG_FILE))
+                except Exception as e2:
+                    log.exception("Anche la pagina d'errore non si e' caricata: %s", e2)
             idx += 1
             time.sleep(interval * 60)
 
