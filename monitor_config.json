@@ -1,6 +1,7 @@
 {
     "interval_minutes": 5,
     "monitor_index": 1,
+    "browser": "chrome",
     "monitors": [
         {
             "ip": "192.168.10.72",

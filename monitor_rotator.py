@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 import traceback
@@ -32,7 +33,10 @@ from urllib.parse import quote as url_quote
 
 from screeninfo import get_monitors
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.edge.service import Service as EdgeService
 
 def _app_dir() -> str:
     """Cartella in cui cercare i file di configurazione.
@@ -167,7 +171,12 @@ def load_config() -> dict:
     except FileNotFoundError:
         log.warning("File di configurazione non trovato: %s", CONFIG_FILE)
         log.info("Creazione con valori default (5 minuti, monitors vuoto)...")
-        default = {"interval_minutes": 5, "monitor_index": 0, "monitors": []}
+        default = {
+            "interval_minutes": 5,
+            "monitor_index": 0,
+            "browser": "chrome",
+            "monitors": [],
+        }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(default, f, indent=4)
         return default
@@ -203,27 +212,35 @@ def pick_target_monitor(monitor_index: int):
     return monitors[0]
 
 
-def create_kiosk_browser(target_monitor=None) -> webdriver.Chrome:
+def create_kiosk_browser(target_monitor=None, browser: str = "chrome"):
     """
-    Crea un'istanza Chrome posizionata sul monitor target e poi fullscreen.
+    Crea un'istanza Chrome o Edge posizionata sul monitor target e poi fullscreen.
 
     Nota: --kiosk da riga di comando IGNORA --window-position (bug noto di
-    Chrome su Windows multi-monitor). La strategia corretta e':
-      1) avviare Chrome NON in kiosk, con un user-data-dir dedicato (niente
+    Chrome/Edge su Windows multi-monitor). La strategia corretta e':
+      1) avviare il browser NON in kiosk, con un user-data-dir dedicato (niente
          stato pregresso che sovrascriva la posizione);
       2) forzare posizione+dimensione con set_window_rect();
       3) entrare in fullscreen tramite API Selenium.
     """
-    options = Options()
+    browser = (browser or "chrome").strip().lower()
+    if browser not in ("chrome", "edge"):
+        log.warning("browser='%s' non riconosciuto, uso 'chrome'.", browser)
+        browser = "chrome"
 
-    # User-data-dir dedicato (temporaneo) per evitare che Chrome ripristini
+    if browser == "edge":
+        options = EdgeOptions()
+    else:
+        options = ChromeOptions()
+
+    # User-data-dir dedicato (temporaneo) per evitare che il browser ripristini
     # la posizione dell'ultima sessione sul monitor sbagliato.
     import tempfile
-    user_data_dir = tempfile.mkdtemp(prefix="monitor_rotator_chrome_")
+    user_data_dir = tempfile.mkdtemp(prefix=f"monitor_rotator_{browser}_")
     options.add_argument(f"--user-data-dir={user_data_dir}")
-    log.debug("Chrome user-data-dir: %s", user_data_dir)
+    log.debug("%s user-data-dir: %s", browser, user_data_dir)
 
-    # Posizione e dimensione iniziali (backup, per i casi in cui Chrome le rispetti).
+    # Posizione e dimensione iniziali (backup, per i casi in cui il browser le rispetti).
     if target_monitor is not None:
         x, y = target_monitor.x, target_monitor.y
         w, h = target_monitor.width, target_monitor.height
@@ -236,15 +253,37 @@ def create_kiosk_browser(target_monitor=None) -> webdriver.Chrome:
     options.add_argument("--no-default-browser-check")
     options.add_argument("--disable-default-apps")
     options.add_argument("--disable-session-crashed-bubble")
-    options.add_argument("--disable-features=TranslateUI")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_argument("--disable-features=TranslateUI,OptimizationHints")
+    # Silenzia i log rumorosi del processo browser (GCM PHONE_REGISTRATION_ERROR,
+    # DevTools listening, TFLite XNNPACK, ecc.).
+    options.add_argument("--log-level=3")
+    options.add_argument("--disable-logging")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-component-update")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-breakpad")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-domain-reliability")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--no-pings")
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
 
-    log.info("Avvio webdriver.Chrome ...")
+    # Reindirizza lo stderr del driver (chromedriver / msedgedriver) su DEVNULL
+    # cosi' i messaggi residui del processo browser non finiscono a console.
+    if browser == "edge":
+        service = EdgeService(log_output=subprocess.DEVNULL)
+    else:
+        service = ChromeService(log_output=subprocess.DEVNULL)
+
+    log.info("Avvio webdriver.%s ...", browser.capitalize())
     try:
-        driver = webdriver.Chrome(options=options)
-        log.info("Chrome avviato correttamente.")
+        if browser == "edge":
+            driver = webdriver.Edge(options=options, service=service)
+        else:
+            driver = webdriver.Chrome(options=options, service=service)
+        log.info("%s avviato correttamente.", browser.capitalize())
     except Exception as e:
-        log.exception("webdriver.Chrome() FALLITO: %s", e)
+        log.exception("webdriver.%s() FALLITO: %s", browser.capitalize(), e)
         raise
 
     # Forza posizione+dimensione via DevTools: funziona sempre, anche quando
@@ -407,6 +446,7 @@ def main():
     config = load_config()
     interval = config.get("interval_minutes", 5)
     monitor_index = int(config.get("monitor_index", 0))
+    browser = (config.get("browser") or "chrome").strip().lower()
 
     # Rileva monitor fisici e sceglie il target
     all_monitors = list_monitors()
@@ -447,7 +487,8 @@ def main():
     log.info("Rotazione ogni %s minuti (da monitor_config.json)", interval)
     log.info("Premi Ctrl+C per fermare.")
 
-    driver = create_kiosk_browser(target_monitor=target_monitor)
+    log.info("Browser scelto: %s (modifica 'browser' in monitor_config.json: 'chrome' | 'edge')", browser)
+    driver = create_kiosk_browser(target_monitor=target_monitor, browser=browser)
 
     def cleanup(_sig=None, _frame=None):
         log.info("Chiusura Chrome (segnale ricevuto)...")
